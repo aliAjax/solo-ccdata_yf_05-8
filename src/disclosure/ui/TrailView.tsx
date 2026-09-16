@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import type { AppEvent, ReviewState } from '../types';
 import { claimLabel } from '../engine';
-import { fmtRanges } from '../utils';
+import { fmtRanges, fmtRangesRaw } from '../utils';
 import { Empty, fmtTime } from './shared';
 
 const EVENT_TEXT: Partial<Record<AppEvent['type'], string>> = {
@@ -135,7 +135,7 @@ function describe(ev: AppEvent, state: ReviewState): Row {
       const c = ev.claim;
       return {
         ...base,
-        title: `登记主张：${claimLabel(c.type)} ${fmtRanges(c.ranges)}`,
+        title: `登记主张：${claimLabel(c.type)} ${fmtRangesRaw(c.ranges)}`,
         icon: Plus,
         tone: 'normal',
         affects: true,
@@ -146,7 +146,7 @@ function describe(ev: AppEvent, state: ReviewState): Row {
       const c = state.claims[ev.claimId];
       return {
         ...base,
-        title: `变更主张：${claimLabel(ev.before.type)} ${fmtRanges(ev.before.ranges)} → ${claimLabel(ev.after.type)} ${fmtRanges(ev.after.ranges)}`,
+        title: `变更主张：${claimLabel(ev.before.type)} ${fmtRangesRaw(ev.before.ranges)} → ${claimLabel(ev.after.type)} ${fmtRangesRaw(ev.after.ranges)}`,
         icon: Pencil,
         tone: 'normal',
         badge: { text: '相关旧结论已失效', cls: 'b-warn' },
@@ -172,7 +172,7 @@ function describe(ev: AppEvent, state: ReviewState): Row {
     case 'redaction.recorded':
       return {
         ...base,
-        title: `登记遮挡：${fmtRanges(ev.redaction.ranges)}`,
+        title: `登记遮挡：${fmtRangesRaw(ev.redaction.ranges)}`,
         icon: ArrowDownWideNarrow,
         tone: 'normal',
         affects: true,
@@ -226,15 +226,18 @@ function describe(ev: AppEvent, state: ReviewState): Row {
         }),
       };
     }
-    case 'anchor.split':
+    case 'anchor.split': {
+      const a = state.anchors[ev.anchorId];
       return {
         ...base,
-        title: `锚点按独立条款拆分处理：${state.anchors[ev.anchorId]?.label ?? ev.anchorId}`,
+        title: `拆分锚点：「${a?.label ?? ev.anchorId}」→ ${ev.children.length} 个独立锚点`,
         icon: MapPinned,
-        tone: 'good',
+        tone: 'normal',
+        badge: { text: `逐项对齐前仍阻断（${ev.children.length} 项待处理）`, cls: 'b-warn' },
         affects: true,
-        lines: ['拆分决定已记录，跨版本引用歧义阻断解除'],
+        lines: ev.children.map((c) => `${c.label}：${c.occurrences.length ? c.occurrences.map((o) => `${o.version} p${o.page}`).join('、') : '暂无候选'}`),
       };
+    }
     case 'pages.orderConfirmed': {
       const f = state.files[ev.fileId];
       return {

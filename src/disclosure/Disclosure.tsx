@@ -187,8 +187,8 @@ export default function Disclosure({ store, initialTab }: { store: ReviewStore; 
         return;
       case 'split_anchor':
         if (issue.anchorId) {
-          append(cmd.splitAnchor(issue.anchorId, { by: ACTOR }));
-          flash('已按独立锚点拆分处理，歧义阻断解除');
+          append(cmd.splitAnchor(state, issue.anchorId, { by: ACTOR }));
+          flash('已拆分为独立锚点；请逐项完成逐版本对齐，全部对齐前仍不能生成清单');
         }
         return;
       default:

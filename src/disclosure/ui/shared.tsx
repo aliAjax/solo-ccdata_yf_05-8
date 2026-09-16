@@ -37,9 +37,20 @@ export function ClaimBadge({ type }: { type: ClaimType }) {
   return <span className={`claim-tag ${CLAIM_CLS[type]}`}>{claimLabel(type)}</span>;
 }
 
-export function Ranges({ ranges }: { ranges: PageRange[] }) {
+export function Ranges({ ranges, raw }: { ranges: PageRange[]; raw?: boolean }) {
   if (!ranges.length) return <span className="muted">—</span>;
-  return <span className="range-chip">{fmtRanges(ranges)}</span>;
+  // raw：保留登记的原始页序（含起止反向），并明确标出
+  const text = raw
+    ? ranges
+        .map((r) => {
+          if (r.from === r.to) return `p${r.from}`;
+          if (r.from > r.to) return `p${r.from}→p${r.to}（反向）`;
+          return `p${r.from}-p${r.to}`;
+        })
+        .join('、')
+    : fmtRanges(ranges);
+  const hasReverse = raw && ranges.some((r) => r.from > r.to);
+  return <span className={`range-chip ${hasReverse ? 'is-reverse' : ''}`}>{text}</span>;
 }
 
 export function Empty({ icon, title, hint }: { icon?: ReactNode; title: string; hint?: string }) {

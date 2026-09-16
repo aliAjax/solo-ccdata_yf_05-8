@@ -184,19 +184,26 @@ export function DocsView({
         {anchors.length > 0 && (
           <section className="pane-card">
             <div className="sub-head">
-              <MapPinned size={14} /> 跨版本锚点（{anchors.length}）
+              <MapPinned size={14} /> 跨版本锚点（{anchors.filter((a) => !a.splitInto).length}）
             </div>
-            {anchors.map((a) => (
-              <div key={a.id} className="anchor-line">
-                <b>
-                  <MapPinned size={13} /> {a.label}
-                </b>
-                <span className="muted">
-                  {a.occurrences.map((o) => `${o.version}: p${o.page}`).join('　')}
-                </span>
-                {a.resolution && <span className="mini-flag latest">{a.resolution.kind === 'split' ? '已拆分' : '已逐版本对齐'}</span>}
-              </div>
-            ))}
+            {anchors
+              .filter((a) => !a.splitInto)
+              .map((a) => (
+                <div key={a.id} className="anchor-line">
+                  <b>
+                    <MapPinned size={13} /> {a.label}
+                  </b>
+                  {a.parentId && <span className="mini-flag relabel">拆分自「{state.anchors[a.parentId]?.label ?? ''}」第 {a.childIndex} 项</span>}
+                  <span className="muted">
+                    {a.occurrences.map((o) => `${o.version}: p${o.page}`).join('　') || '各版本均无候选'}
+                  </span>
+                  {a.resolution?.kind === 'pick' ? (
+                    <span className="mini-flag latest">已逐版本对齐</span>
+                  ) : a.parentId ? (
+                    <span className="mini-flag outorder">待逐版本对齐</span>
+                  ) : null}
+                </div>
+              ))}
           </section>
         )}
       </div>
@@ -374,7 +381,7 @@ function ClaimRow({
     <div className={`reg-row ${claim.active ? '' : 'inactive'}`}>
       <div className="reg-main">
         <ClaimBadge type={claim.type} />
-        <Ranges ranges={claim.ranges} />
+        <Ranges ranges={claim.ranges} raw />
         <span className="muted">{scope}</span>
         <span className="muted">{claim.assertedBy}</span>
         {claim.basis && <span className="reg-note">{claim.basis}</span>}
@@ -452,7 +459,7 @@ function RedRow({ red, onWithdraw, onAmend }: { red: RedE; onWithdraw: () => voi
         <span className="redact-tag">
           <Shrink size={12} /> 遮挡
         </span>
-        <Ranges ranges={red.ranges} />
+        <Ranges ranges={red.ranges} raw />
         <span className="muted">{red.version ?? '全版本'}</span>
         {red.note && <span className="reg-note">{red.note}</span>}
         {red.mergedInto && <span className="mini-flag relabel">已合并</span>}

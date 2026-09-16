@@ -4,7 +4,7 @@
  */
 import React from 'react';
 import { renderToString } from 'react-dom/server';
-import { initialState, reduce, analyze, canGenerate } from '../src/disclosure/engine';
+import { initialState, reduce, replay, analyze, canGenerate, docVersions } from '../src/disclosure/engine';
 import * as cmd from '../src/disclosure/commands';
 import { demoBatch, packetD } from '../src/disclosure/demo';
 import type { AppEvent, ReviewState } from '../src/disclosure/types';
@@ -113,6 +113,93 @@ console.log('组件 SSR 冒烟测试');
   const reOpen = analyze(state).issues.find((i) => i.kind === 'anchor_ambiguous' && i.status === 'open');
   if (!reOpen) throw new Error('新证据后锚点歧义应重新打开');
   check('补证使旧锚点结论失效后可渲染', () => renderWith(state, log));
+}
+
+// 4. 绕过修复一：手动登记反向页序在各界面原样可见
+{
+  let state = initialState();
+  const log: AppEvent[] = [];
+  const step = (evs: AppEvent[]) => {
+    log.push(...evs);
+    state = evs.reduce(reduce, state);
+  };
+  step(cmd.importPacket(state, {
+    name: 'p.zip',
+    docs: [{ key: 'd', title: '《测试文书》', summary: '', versions: [{ label: 'v1', sha: 'h1', pageCount: 30 }] }],
+  }, { by: 't' }));
+  const docKey = Object.keys(state.docs)[0];
+  step(cmd.recordClaim(state, { docKey, version: 'v1', ranges: [{ from: 12, to: 9 }], type: 'privileged', basis: '反向', assertedBy: '我' }, { by: 't' }));
+  step(cmd.recordRedaction({ docKey, version: 'v1', ranges: [{ from: 20, to: 15 }], note: '反向遮挡' }, { by: 't' }));
+
+  const docsHtml = renderWith(state, log, 'docs');
+  check('文书库显示原始反向页序（p12→p9）', () => docsHtml);
+  if (!docsHtml.includes('p12→p9') || !docsHtml.includes('反向')) throw new Error('文书库未保留/标注反向页序');
+
+  const trailHtml = renderWith(state, log, 'trail');
+  if (!trailHtml.includes('p12→p9')) throw new Error('操作轨迹未保留原始反向页序');
+
+  const manifestHtml = renderWith(state, log, 'manifest');
+  if (!manifestHtml.includes('不能生成披露清单')) throw new Error('反向区间应阻断清单生成');
+  if (canGenerate(state).ok) throw new Error('canGenerate 应为 false');
+}
+
+// 5. 绕过修复二：拆分形成独立锚点，逐项对齐前门禁关闭
+{
+  let state = initialState();
+  const log: AppEvent[] = [];
+  const step = (evs: AppEvent[]) => {
+    log.push(...evs);
+    state = evs.reduce(reduce, state);
+  };
+  step(cmd.importPacket(state, {
+    name: 'p.zip',
+    docs: [{
+      key: 'd', title: '《锚点文书》', summary: '',
+      versions: [
+        { label: 'v2', sha: 'h2', pageCount: 30 },
+        { label: 'v1', sha: 'h1', pageCount: 28 },
+      ],
+      anchors: [{ id: 'anc', doc: 'd', label: '第3条 付款', occurrences: [{ version: 'v2', page: 4 }, { version: 'v2', page: 18 }, { version: 'v1', page: 5 }] }],
+    }],
+  }, { by: 't' }));
+  const docKey = Object.keys(state.docs)[0];
+  const before = analyze(state).issues.filter((i) => i.kind === 'anchor_ambiguous');
+  if (before.length !== 1) throw new Error('拆分前应有一个锚点歧义问题');
+
+  step(cmd.splitAnchor(state, 'anc', { by: 't' }));
+  const children = state.anchors['anc'].splitInto ?? [];
+  if (children.length !== 2) throw new Error('应拆分为 2 个独立锚点');
+  if (canGenerate(state).ok) throw new Error('拆分后未逐项对齐前不能生成清单');
+
+  const reviewHtml = renderWith(state, log, 'review');
+  check('拆分后审查台列出两个独立锚点阻断', () => reviewHtml);
+  if (reviewHtml.includes('已拆分') && !reviewHtml.includes('拆分锚点待')) {
+    // 不应再出现“点拆分即解除”的旧文案
+  }
+  if (!reviewHtml.includes('拆分锚点待逐版本对齐确认')) throw new Error('子锚点须显示为待对齐阻断');
+
+  const docsHtml = renderWith(state, log, 'docs');
+  if (!docsHtml.includes('第3条 付款 · 一') || !docsHtml.includes('第3条 付款 · 二')) throw new Error('文书库应列出两个独立锚点');
+
+  // 只对齐第一个：仍阻断
+  const labels = docVersions(state, docKey).map((f) => f.label);
+  const choicesOf = (cid: string) => {
+    const c = state.anchors[cid];
+    const ch: Record<string, string | null> = {};
+    for (const l of labels) ch[l] = c.occurrences.find((o) => o.version === l)?.id ?? null;
+    return ch;
+  };
+  step(cmd.resolveAnchor(state, children[0], choicesOf(children[0]), { by: 't' }));
+  if (canGenerate(state).ok) throw new Error('仅对齐一个子锚点时仍应阻断');
+
+  step(cmd.resolveAnchor(state, children[1], choicesOf(children[1]), { by: 't' }));
+  if (!canGenerate(state).ok) throw new Error('两个子锚点全部对齐后应可生成');
+
+  // 刷新重放：拆分关系与对齐结论保持
+  const restored = replay(log);
+  if (restored.anchors['anc'].splitInto?.length !== 2) throw new Error('重放后拆分关系丢失');
+  if (!canGenerate(restored).ok) throw new Error('重放后应仍可生成');
+  check('拆分→逐项对齐→刷新重放一致', () => renderWith(restored, log, 'review'));
 }
 
 console.log(`\n组件冒烟测试全部通过（${n} 个渲染检查）✅`);

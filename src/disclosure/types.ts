@@ -149,6 +149,11 @@ export interface AnchorE {
   docKey: string;
   label: string;
   occurrences: AnchorOcc[];
+  /** 拆分后形成的独立锚点；原锚点随之退役，不再参与核对 */
+  splitInto?: string[];
+  /** 子锚点：来自哪个父锚点及第几个 */
+  parentId?: string;
+  childIndex?: number;
   resolution?:
     | { kind: 'pick'; choices: Record<string, string | null>; occSig: string } // version -> occId（null=确认该版本确无此锚点）
     | { kind: 'split' };
@@ -309,7 +314,7 @@ export type AppEvent =
       anchorId: string;
       choices: Record<string, string | null>;
     })
-  | (EvBase & { type: 'anchor.split'; anchorId: string })
+  | (EvBase & { type: 'anchor.split'; anchorId: string; children: AnchorE[] })
   | (EvBase & { type: 'pages.orderConfirmed'; fileId: string })
   | (EvBase & {
       type: 'version.relabeled';

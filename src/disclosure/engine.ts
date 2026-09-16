@@ -69,9 +69,10 @@ export function reduce(state: ReviewState, ev: AppEvent): ReviewState {
       for (const c of p.claims) if (!claims[c.id]) claims[c.id] = c;
       for (const r of p.redactions) if (!redactions[r.id]) redactions[r.id] = r;
       for (const a of p.anchors) {
-        // 同一锚点可能在后续包中补充新的出现位置，逐 occ 合并
+        // 同一锚点可能在后续包中补充新的出现位置，逐 occ 合并；已拆分退役的父锚点不再并入
         const old = anchors[a.id];
         if (!old) anchors[a.id] = a;
+        else if (old.splitInto) continue;
         else {
           const seen = new Set(old.occurrences.map((o) => `${o.version}|${o.page}`));
           anchors[a.id] = {
@@ -190,10 +191,11 @@ export function reduce(state: ReviewState, ev: AppEvent): ReviewState {
     case 'anchor.split': {
       const a = state.anchors[ev.anchorId];
       if (!a) return state;
-      return {
-        ...state,
-        anchors: { ...state.anchors, [a.id]: { ...a, resolution: { kind: 'split' } } },
-      };
+      // 拆分：原锚点退役（splitInto 指向子锚点），形成可分别处理的独立锚点
+      const anchors = { ...state.anchors };
+      anchors[a.id] = { ...a, resolution: { kind: 'split' }, splitInto: ev.children.map((c) => c.id) };
+      for (const c of ev.children) anchors[c.id] = c;
+      return { ...state, anchors };
     }
 
     case 'pages.orderConfirmed': {
@@ -835,6 +837,8 @@ export function analyze(state: ReviewState): AnalysisResult {
 
     /* ---- 5. 跨版本锚点歧义（阻断） ---- */
     for (const a of Object.values(state.anchors).filter((x) => x.docKey === doc.key)) {
+      // 已拆分的父锚点退役：不再参与核对，由其独立子锚点分别处理
+      if (a.splitInto) continue;
       const labels = docVersions(state, doc.key).map((f) => f.label);
       const byVersion = new Map<string, AnchorE['occurrences']>();
       for (const o of a.occurrences) {
@@ -845,36 +849,48 @@ export function analyze(state: ReviewState): AnalysisResult {
       const dupVersions = [...byVersion.entries()].filter(([, occ]) => occ.length > 1).map(([v]) => v);
       const missingVersions = labels.filter((l) => !byVersion.has(l));
       const ambiguous = dupVersions.length > 0 || missingVersions.length > 0;
+      const isChild = Boolean(a.parentId);
+      const pickValid = a.resolution?.kind === 'pick' && a.resolution.occSig === anchorOccSig(a) && resolutionComplete(a, labels, byVersion);
 
-      const resolved =
-        (a.resolution?.kind === 'split') ||
-        (a.resolution?.kind === 'pick' && a.resolution.occSig === anchorOccSig(a) && resolutionComplete(a, labels, byVersion));
-      if (ambiguous && !resolved) {
+      // 拆分出的子锚点即使每个版本恰有一个候选，也必须逐项确认对齐后才解除阻断
+      const needsConfirm = isChild && !ambiguous && !pickValid;
+
+      if ((ambiguous || needsConfirm) && !pickValid) {
         const key = `anchor:${a.id}`;
+        const splitTag = isChild ? `（由「${state.anchors[a.parentId!]?.label ?? a.parentId}」拆分的第 ${a.childIndex} 个锚点）` : '';
         push({
           key,
           kind: 'anchor_ambiguous',
           severity: 'blocking',
-          title: `跨版本锚点歧义：「${a.label}」`,
+          title: needsConfirm
+            ? `拆分锚点待逐版本对齐确认：「${a.label}」`
+            : `跨版本锚点歧义：「${a.label}」`,
           docKey: doc.key,
           anchorId: a.id,
           detail:
+            splitTag +
             (dupVersions.length
               ? `同一版本内命中多处：${dupVersions.map((v) => `${v} 版 p${byVersion.get(v)!.map((o) => o.page).join('/p')}`).join('；')}。`
               : '') +
-            (missingVersions.length ? `以下版本未找到该锚点：${missingVersions.join('、')}（版本漂移或扫描缺页）。` : '') +
-            '引用页在版本间无法对齐，须逐版本指定对应位置（确认缺失可显式标注“该版本无此锚点”），或拆分为多个锚点。',
+            (missingVersions.length
+              ? (dupVersions.length ? '' : '') + `以下版本未找到该锚点：${missingVersions.join('、')}（版本漂移或扫描缺页）。`
+              : '') +
+            (needsConfirm
+              ? '拆分后须逐项确认每个版本对应的页（无此条款的版本显式标注“无此锚点”），全部子锚点对齐前不能生成披露清单。'
+              : '引用页在版本间无法对齐，须逐版本指定对应位置（确认缺失可显式标注“该版本无此锚点”），或拆分为多个独立锚点。'),
           sig: `${key}|${anchorOccSig(a)}|${labels.join(',')}`,
-          actions: [
-            { id: 'pick', label: '逐版本指定锚点位置', kind: 'resolve_anchor' },
-            { id: 'split', label: '拆分为独立锚点', kind: 'split_anchor' },
-          ],
+          actions: isChild
+            ? [{ id: 'pick', label: '逐版本指定/确认锚点位置', kind: 'resolve_anchor' }]
+            : [
+                { id: 'pick', label: '逐版本指定锚点位置', kind: 'resolve_anchor' },
+                { id: 'split', label: '拆分为独立锚点', kind: 'split_anchor' },
+              ],
         });
       }
 
-      // 锚点漂移（信息）：各版本位置相差较大
+      // 锚点漂移（信息）：各版本位置相差较大（拆分出的子锚点在对齐完成前不重复提示）
       const pages = [...byVersion.values()].map((occ) => occ[0]?.page).filter((p): p is number => typeof p === 'number');
-      if (pages.length > 1 && Math.max(...pages) - Math.min(...pages) >= 3 && !ambiguous) {
+      if (pages.length > 1 && Math.max(...pages) - Math.min(...pages) >= 3 && !ambiguous && !isChild) {
         const key = `anchordrift:${a.id}`;
         push({
           key,

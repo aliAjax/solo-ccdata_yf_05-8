@@ -506,9 +506,36 @@ console.log('场景 10 · 其余处置原语');
   assert.equal(u.redactions.rx1.rev, 2);
   assert.equal(analyze(u).issues.filter((i) => i.kind === 'range_reversed' && i.status === 'open').length, 0, '更正后反向区间消失');
 
-  // 锚点拆分 -> 歧义阻断解除
-  u = dispatch(u, cmd.splitAnchor('anc-x', { ...ME, at: '2026-09-13T03:20:00Z' }));
-  assert.equal(analyze(u).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 0, '拆分后歧义解除');
+  // 锚点拆分 -> 形成两个独立锚点，各自仍阻断，直到逐项对齐
+  const splitEvs = cmd.splitAnchor(u, 'anc-x', { ...ME, at: '2026-09-13T03:20:00Z' });
+  u = dispatch(u, splitEvs);
+  const parent = u.anchors['anc-x'];
+  assert.ok(parent.splitInto && parent.splitInto.length === 2, '拆分应形成 2 个独立锚点');
+  const childIds = parent.splitInto!;
+  assert.ok(childIds.every((id) => u.anchors[id].parentId === 'anc-x'), '子锚点应记录父锚点');
+  let ambIssues = analyze(u).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open');
+  assert.equal(ambIssues.length, 2, '两个子锚点未逐项对齐前都应阻断');
+  assert.equal(canGenerate(u).ok, false, '拆分后未全部对齐前不能生成清单');
+  // 原父锚点的问题消失（退役）
+  assert.ok(!analyze(u).issues.some((i) => i.anchorId === 'anc-x'), '父锚点退役后不再产生问题');
+
+  // 只对齐第一个子锚点 -> 仍剩一个阻断
+  const labels = docVersions(u, parent.docKey).map((f) => f.label);
+  const resolveChild = (childId: string) => {
+    const child = u.anchors[childId];
+    const choices: Record<string, string | null> = {};
+    for (const l of labels) {
+      const occ = child.occurrences.find((o) => o.version === l);
+      choices[l] = occ ? occ.id : null;
+    }
+    return cmd.resolveAnchor(u, childId, choices, { ...ME, at: '2026-09-13T03:25:00Z' });
+  };
+  u = dispatch(u, resolveChild(childIds[0]));
+  assert.equal(analyze(u).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 1, '对齐一个后仍有一个阻断');
+  assert.equal(canGenerate(u).ok, false);
+  u = dispatch(u, resolveChild(childIds[1]));
+  assert.equal(analyze(u).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 0, '两个子锚点全部对齐后阻断解除');
+  assert.equal(canGenerate(u).ok, true, '全部子锚点对齐后才能生成');
 
   // 警告处置后，撤回主张 -> 旧结论失效（且 orphan redaction 警告变化）
   // rx1 p5-9 无保密主张支撑（cx1 只到 p4）-> orphan 警告
@@ -523,7 +550,95 @@ console.log('场景 10 · 其余处置原语');
   );
   const after = analyze(u).issues.find((i) => i.key === orphan.key);
   assert.ok(!after, '补登覆盖 p5-9 的主张后，无支撑警告应消失');
-  console.log('  ✓ 同标签异内容重标、遮挡反向更正、锚点拆分、警告随补正失效，均通过');
+  console.log('  ✓ 同标签异内容重标、遮挡反向更正、拆分后逐项对齐门禁、警告随补正失效，均通过');
+}
+
+/* ================= 场景 11：两个绕过阻断的修复核对 ================= */
+console.log('场景 11 · 手动登记反向页序必须保留并阻断；拆分锚点必须逐项对齐');
+{
+  let v = initialState();
+  const log: AppEvent[] = [];
+  const step = (evs: AppEvent[]) => {
+    log.push(...evs);
+    v = evs.reduce(reduce, v);
+  };
+  step(cmd.importPacket(v, {
+    name: '包Z.zip',
+    docs: [{ key: 'z', title: '《验收报告》', summary: '', versions: [{ label: 'v1', sha: 'z1', pageCount: 30 }] }],
+  }, { ...ME, at: '2026-09-14T01:00:00Z' }));
+  const zKey = Object.keys(v.docs)[0];
+
+  // 手动登记 “12-9”：原始顺序必须原样保留，且出现反向区间阻断
+  step(cmd.recordClaim(v, { docKey: zKey, version: 'v1', ranges: [{ from: 12, to: 9 }], type: 'privileged', basis: '误填反向页序', assertedBy: '我方登记' }, { ...ME, at: '2026-09-14T02:00:00Z' }));
+  const claim = Object.values(v.claims)[0];
+  assert.deepEqual(claim.ranges, [{ from: 12, to: 9 }], '主张必须保留登记时的原始页序 12→9');
+  let a = analyze(v);
+  assert.ok(a.issues.some((i) => i.kind === 'range_reversed' && i.status === 'open'), '反向主张区间必须标阻断');
+  assert.equal(canGenerate(v).ok, false, '存在反向区间时不能生成清单');
+
+  // 手动登记反向遮挡同样处理
+  step(cmd.recordRedaction({ docKey: zKey, version: 'v1', ranges: [{ from: 20, to: 15 }], note: '误填反向遮挡' }, { ...ME, at: '2026-09-14T02:10:00Z' }));
+  const red = Object.values(v.redactions)[0];
+  assert.deepEqual(red.ranges, [{ from: 20, to: 15 }], '遮挡必须保留原始页序 20→15');
+  assert.equal(analyze(v).issues.filter((i) => i.kind === 'range_reversed' && i.status === 'open').length, 2, '主张与遮挡各一条反向阻断');
+
+  // 用“交换起止页”动作修正（normRange）后阻断解除
+  step(cmd.amendClaim(claim, { ranges: [{ from: 9, to: 12 }] }, { ...ME, at: '2026-09-14T02:20:00Z' }));
+  step(cmd.amendRedaction(red, [{ from: 15, to: 20 }], { ...ME, at: '2026-09-14T02:21:00Z' }));
+  assert.equal(analyze(v).issues.filter((i) => i.kind === 'range_reversed' && i.status === 'open').length, 0, '交换起止后反向阻断消失');
+  assert.equal(canGenerate(v).ok, true);
+
+  // 拆分锚点：先构造同版本双命中 + 另一版本缺失
+  step(cmd.importPacket(v, {
+    name: '包Z2.zip',
+    docs: [{
+      key: 'z', title: '《验收报告》', summary: '',
+      versions: [{ label: 'v2', sha: 'z2', pageCount: 32 }],
+      anchors: [{ id: 'anc-z', doc: 'z', label: '附件一 清单', occurrences: [{ version: 'v2', page: 5 }, { version: 'v2', page: 22 }, { version: 'v1', page: 6 }] }],
+    }],
+  }, { ...ME, at: '2026-09-14T03:00:00Z' }));
+  // 注意：v1 先在包Z中已存在，锚点合并后 v1 1 处、v2 2 处
+  const az = analyze(v).issues.find((i) => i.kind === 'anchor_ambiguous' && i.status === 'open')!;
+  assert.ok(az, '拆分前应存在锚点歧义阻断');
+
+  step(cmd.splitAnchor(v, 'anc-z', { ...ME, at: '2026-09-14T03:10:00Z' }));
+  const zChildren = v.anchors['anc-z'].splitInto!;
+  assert.equal(zChildren.length, 2, '应按 v2 的 2 处命中拆成 2 个独立锚点');
+  assert.equal(analyze(v).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 2, '两个子锚点均阻断');
+  assert.equal(canGenerate(v).ok, false);
+
+  // 再次对齐：两个子锚点分别逐版本确认（v1 各 1 处，其中一个须在 v1 确认“无此锚点”）
+  const zLabels = docVersions(v, zKey).map((f) => f.label); // [v2, v1]
+  for (const cid of zChildren) {
+    const child = v.anchors[cid];
+    const choices: Record<string, string | null> = {};
+    for (const l of zLabels) {
+      const occ = child.occurrences.find((o) => o.version === l);
+      choices[l] = occ ? occ.id : null; // 该版本没有第 n 个命中 -> 显式确认无此锚点
+    }
+    step(cmd.resolveAnchor(v, cid, choices, { ...ME, at: '2026-09-14T03:20:00Z' }));
+  }
+  assert.equal(analyze(v).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 0, '逐项对齐完成后阻断解除');
+  assert.equal(canGenerate(v).ok, true);
+
+  // 刷新重放：仅用事件日志重建，状态与轨迹完全一致
+  const restored = replay(log);
+  const restoredClaim = restored.claims[Object.keys(restored.claims)[0]];
+  assert.deepEqual(restoredClaim.ranges, [{ from: 9, to: 12 }], '当前状态为交换起止后的正确页序 9-12');
+  assert.deepEqual(
+    restoredClaim.history[0].ranges,
+    [{ from: 12, to: 9 }],
+    '轨迹首条快照必须保留最初登记的反向页序 12→9（历史保真）',
+  );
+  assert.deepEqual(restoredClaim.history[1].ranges, [{ from: 9, to: 12 }], '轨迹第二条为交换起止后的页序');
+  assert.equal(restoredClaim.history.length, 2, '主张变更轨迹（登记 + 交换起止）完整保留');
+  assert.deepEqual(restored.anchors['anc-z'].splitInto, zChildren, '拆分关系刷新后保持');
+  assert.equal(analyze(restored).issues.filter((i) => i.kind === 'anchor_ambiguous' && i.status === 'open').length, 0);
+  assert.equal(canGenerate(restored).ok, true);
+  // 事件轨迹中确实包含“登记反向”“交换起止”“拆分”“两次对齐”等记录
+  const types = log.map((e) => e.type);
+  assert.ok(types.includes('anchor.split') && types.filter((t) => t === 'anchor.resolved').length >= 2);
+  console.log('  ✓ 手动反向登记保留原始页序并阻断；拆分形成独立锚点、逐项对齐前门禁关闭；刷新重放一致');
 }
 
 console.log(`\n全部 ${passed} 项自检通过 ✅`);

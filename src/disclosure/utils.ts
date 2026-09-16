@@ -90,6 +90,17 @@ export function fmtRanges(ranges: PageRange[]): string {
     .join('、');
 }
 
+/** 保留登记原始页序，起止反向时明确标出，不做翻转 */
+export function fmtRangesRaw(ranges: PageRange[]): string {
+  return ranges
+    .map((r) => {
+      if (r.from === r.to) return `p${r.from}`;
+      if (r.from > r.to) return `p${r.from}→p${r.to}（反向）`;
+      return `p${r.from}-p${r.to}`;
+    })
+    .join('、');
+}
+
 /* ---------- 版本标签 ---------- */
 
 export interface ParsedVersion {
